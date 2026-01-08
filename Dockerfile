@@ -41,12 +41,16 @@ RUN apt-get update && apt-get install -y -q --no-install-recommends \
     make \
     apt-utils
 
+
+# Add older toolchain for TEASER++
+RUN apt-get update && apt-get install -y g++-9 gcc-9
+   
 # ROS 2
 RUN sh -c 'echo "deb [arch=amd64,arm64] http://repo.ros2.org/ubuntu/main `lsb_release -cs` main" > /etc/apt/sources.list.d/ros2-latest.list'
 RUN curl -s https://raw.githubusercontent.com/ros/rosdistro/master/ros.asc | sudo apt-key add -
 RUN curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key -o /usr/share/keyrings/ros-archive-keyring.gpg
 RUN echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(. /etc/os-release && echo $UBUNTU_CODENAME) main" | sudo tee /etc/apt/sources.list.d/ros2.list > /dev/null
-RUN apt-get update && apt-get install -y -q --no-install-recommends \ 
+RUN apt-get update && apt-get install -y -q --no-install-recommends \
     python3-colcon-common-extensions \
     ros-${ROS_DISTRO}-desktop \
     ros-${ROS_DISTRO}-rmw-cyclonedds-cpp
@@ -59,19 +63,42 @@ WORKDIR /ros_ws
 
 COPY . /ros_ws/src/multi_lidar_calibration/
 
-RUN cd /ros_ws/src/multi_lidar_calibration/TEASER-plusplus && \
-    mkdir build && \
-    cd build && \
-    cmake -DTEASERPP_PYTHON_VERSION=3.10 .. && \
-    make teaserpp_python && \
-    cd python && pip install .
+# --- TEASER++: clone, patch, build with GCC 9 (with python bindings) ---
+RUN git clone --depth 1 https://github.com/MIT-SPARK/TEASER-plusplus.git /ros_ws/src/TEASER-plusplus
+
+# fix strict include on newer libstdc++
+RUN sed -i '1i #include <vector>\nusing std::vector;' /ros_ws/src/TEASER-plusplus/teaser/src/graph.cc
+
+RUN mkdir -p /ros_ws/src/TEASER-plusplus/build && cd /ros_ws/src/TEASER-plusplus/build && \
+    cmake \
+      -DCMAKE_C_COMPILER=gcc-9 \
+      -DCMAKE_CXX_COMPILER=g++-9 \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_CXX_STANDARD=17 \
+      -DBUILD_TESTS=OFF \
+      -DBUILD_EXAMPLES=OFF \
+      -DBUILD_PYTHON_BINDINGS=ON \
+      -DTEASERPP_PYTHON_VERSION=3.10 \
+      -DCMAKE_INSTALL_PREFIX=/usr/local \
+      .. && \
+    make -j"$(nproc)" && make install && ldconfig && \
+    make -j"$(nproc)" teaserpp_python && \
+    find . -name "*.whl" -exec pip install {} \;
+
 
 RUN pip install --no-cache-dir --upgrade pip && \
   pip install --no-cache-dir -r src/multi_lidar_calibration/requirements.txt
+
+ENV PYTHONPATH=/ros_ws/src/TEASER-plusplus/build/python:$PYTHONPATH
+RUN printf "/usr/local/lib\n" > /etc/ld.so.conf.d/teaser.conf && ldconfig
+
+
 
 RUN /bin/bash -c '. /opt/ros/$ROS_DISTRO/setup.bash && \
     colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release --packages-up-to multi_lidar_calibrator'
 
 ENV QT_DEBUG_PLUGINS=1
+
+RUN bash -c "source install/setup.bash"
 
 CMD [ "bash" ]
